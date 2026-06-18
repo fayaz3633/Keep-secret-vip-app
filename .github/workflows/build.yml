@@ -27,7 +27,7 @@ jobs:
     - name: Install Android Build Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential ccache git libffi-dev libssl-dev xclip libsdl2-dev libsdl2-image-dev libsdl2-txt-dev libsdl2-ttf-dev make fontconfig libjpeg-dev autoconf automake libtool pkg-config zlib1g-dev python3-pip python3-setuptools
+        sudo apt-get install -y build-essential ccache git libffi-dev libssl-dev xclip libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev make fontconfig libjpeg-dev autoconf automake libtool pkg-config zlib1g-dev python3-pip python3-setuptools
         pip3 install --user --upgrade buildozer cython virtualenv
 
     - name: Compile APK via Buildozer Cloud Engine
@@ -40,4 +40,3 @@ jobs:
       with:
         name: Keep-Secret-VIP-v5.6-APK
         path: bin/*.apk
-        
