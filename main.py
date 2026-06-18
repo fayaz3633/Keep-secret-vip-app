@@ -2,10 +2,12 @@ import os
 import time
 import sqlite3
 import base64
-import hashlib
-from cryptography.hazmat.primitives import hmac, hashes
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
+
+# PyCryptodome Modules (سپر اسٹیبل اینڈرائیڈ کرپٹو)
+from Crypto.Cipher import AES
+from Crypto.Hash import SHA256, HMAC
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.Random import get_random_bytes
 
 # Kivy UX Modules
 from kivy.app import App
@@ -14,33 +16,28 @@ from kivy.clock import Clock
 from kivy.utils import platform
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.filechooser import FileChooserIconView
-from kivy.uix.popup import Popup
-from kivy.uix.button import Button
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.label import Label
 
 # --- اینڈرائیڈ کے لیے مخصوص مستحکم سیٹنگز اور پاتھ ---
 if platform == 'android':
     from android.storage import app_storage_path
     from android.permissions import request_permissions, Permission
     DB_FILE = os.path.join(app_storage_path(), ".vault.db")
-    # آپ کا شاندار مشورہ: اینڈرائیڈ 11+ کے لیے سب سے مستحکم ہوم پاتھ
     DEFAULT_PATH = "/storage/emulated/0" 
 else:
     DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".vault.db")
     DEFAULT_PATH = "."
 
-# --- کرپٹوگرافی اور کور انجن (v5.6) ---
+# --- کرپٹوگرافی اور کور انجن (v5.6 - PyCryptodome الائنڈ) ---
 def derive_keys(pin, salt):
-    stretched = hashlib.pbkdf2_hmac('sha256', pin.encode(), salt, 100000, dklen=64)
+    # PBKDF2 کے ذریعے 64 بائٹس کی کیز بنانا (100k Iterations)
+    stretched = PBKDF2(pin.encode(), salt, dkLen=64, count=100000, hmac_hash_module=SHA256)
     return stretched[:32], stretched[32:]
 
 def hash_pin(pin, salt):
-    return hashlib.pbkdf2_hmac('sha256', pin.encode(), salt, 100000).hex()
+    return PBKDF2(pin.encode(), salt, dkLen=32, count=100000, hmac_hash_module=SHA256).hex()
 
 def capture_intruder():
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    # ٹرمکس کیمرا اٹیمپٹ
     if platform == 'android':
         try:
             import subprocess
@@ -48,8 +45,6 @@ def capture_intruder():
             subprocess.run(["termux-camera-photo", "-c", "1", photo_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-    
-    # آپ کی تجویز کے مطابق آف لائن سیکیورٹی لاگ فال بیک
     try:
         log_path = os.path.join(app_storage_path() if platform == 'android' else '.', "security_brute_logs.txt")
         with open(log_path, "a") as f:
@@ -58,17 +53,21 @@ def capture_intruder():
         pass
 
 def encrypt_aes256(data_bytes, pin):
-    salt = os.urandom(16)
+    salt = get_random_bytes(16)
     aes_key, hmac_key = derive_keys(pin, salt)
-    iv = os.urandom(16)   
+    iv = get_random_bytes(16)
+    
+    # PKCS7 Padding
     pad_len = 16 - (len(data_bytes) % 16)
     padded_data = data_bytes + bytes([pad_len] * pad_len)
-    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
-    h = hmac.HMAC(hmac_key, hashes.SHA256(), backend=default_backend())
-    h.update(iv + ciphertext)
-    mac = h.finalize()
+    
+    cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+    ciphertext = cipher.encrypt(padded_data)
+    
+    # HMAC-SHA256 برائے انٹیگریٹی چیلنج
+    hmac_obj = HMAC.new(hmac_key, iv + ciphertext, digestmod=SHA256)
+    mac = hmac_obj.digest()
+    
     combined = salt + iv + mac + ciphertext
     return base64.urlsafe_b64encode(combined).decode()
 
@@ -77,14 +76,20 @@ def decrypt_aes256(enc_data_b64, pin):
         combined = base64.urlsafe_b64decode(enc_data_b64.encode())
         if len(combined) < 64: return None
         salt, iv, mac_stored, ciphertext = combined[:16], combined[16:32], combined[32:64], combined[64:]
+        
         aes_key, hmac_key = derive_keys(pin, salt)
-        h = hmac.HMAC(hmac_key, hashes.SHA256(), backend=default_backend())
-        h.update(iv + ciphertext)
-        try: h.verify(mac_stored)
-        except Exception: return b"[X] INTEGRITY ERROR"
-        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
-        decryptor = cipher.decryptor()
-        padded_msg = decryptor.update(ciphertext) + decryptor.finalize()
+        
+        # HMAC ویریفیکیشن
+        hmac_obj = HMAC.new(hmac_key, iv + ciphertext, digestmod=SHA256)
+        try:
+            hmac_obj.verify(mac_stored)
+        except Exception:
+            return b"[X] INTEGRITY ERROR"
+            
+        cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+        padded_msg = cipher.decrypt(ciphertext)
+        
+        # Unpadding
         pad_len = padded_msg[-1]
         if pad_len < 1 or pad_len > 16: return None
         return padded_msg[:-pad_len]
@@ -279,7 +284,7 @@ ScreenManager:
             size_hint_y: None
             height: '40dp'
         Label:
-            text: 'Engine: True AES-256 (CBC Primitives)\\nIntegrity: HMAC-SHA256 Multi-Segment\\nHardening: PBKDF2-HMAC (100k Iterations)\\nAnti-Tamper: Local File & Cam Logging Active\\nSession Lock: 60s Rolling Timer Active'
+            text: 'Engine: Pure PyCryptodome AES-256 (CBC)\\nIntegrity: HMAC-SHA256 Signatures Active\\nHardening: PBKDF2 Key Stretching (100k Iterations)\\nAnti-Tamper: Local Logs & Camera Armed\\nSession Lock: 60s Rolling Timer Active'
             halign: 'center'
         Button:
             text: 'Back'
@@ -454,7 +459,6 @@ class KeepSecretVIPApp(App):
     def build(self):
         init_database()
         if platform == 'android':
-            # پلے اسٹور کمپلائنٹ کلین پرمیشن لسٹ
             request_permissions([Permission.CAMERA, Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE])
         return Builder.load_string(KV_UI)
 
@@ -478,4 +482,4 @@ class KeepSecretVIPApp(App):
 
 if __name__ == '__main__':
     KeepSecretVIPApp().run()
-                                
+            
